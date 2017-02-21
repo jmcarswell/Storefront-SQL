@@ -1,0 +1,109 @@
+USE [ndiofcom]
+GO
+
+/****** Object:  StoredProcedure [dbo].[aspdnsf_ProductInfo]    Script Date: 2/20/2017 7:23:43 PM ******/
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+
+CREATE PROCEDURE [dbo].[aspdnsf_ProductInfo]
+    @ProductID          INT,
+    @CustomerLevelID    INT,
+    @DefaultVariantOnly TINYINT,
+    @InvFilter          INT = 0,
+    @AffiliateID        INT = null,
+    @PublishedOnly      TINYINT = 1,
+    @IsAdmin			TINYINT = 0,
+    @StoreID			INT = 0
+AS BEGIN
+	SET NOCOUNT ON
+	DECLARE
+		@CustLevelExists INT,
+		@AffiliateExists INT,
+		@FilterProductsByAffiliate TINYINT,
+		@FilterProductsByCustomerLevel TINYINT,
+		@CustomerLevelFilteringIsAscending TINYINT,
+		@CustomerLevelCount INT,
+		@AffiliateCount INT,
+		@MinProductCustomerLevel INT,
+		@HideProductsWithLessThanThisInventoryLevel INT
+
+		SET @FilterProductsByCustomerLevel = (SELECT TOP 1 CASE ConfigValue WHEN 'true' THEN 1 ELSE 0 END FROM dbo.AppConfig WITH (NOLOCK) WHERE Name = 'FilterProductsByCustomerLevel' AND (StoreID = @StoreID OR StoreID = 0) ORDER BY StoreID DESC)
+		SET @CustomerLevelFilteringIsAscending= (SELECT TOP 1 CASE ConfigValue WHEN 'true' THEN 1 ELSE 0 END FROM dbo.AppConfig WITH (NOLOCK) WHERE Name = 'FilterByCustomerLevelIsAscending'	AND (StoreID = @StoreID OR StoreID = 0) ORDER BY StoreID DESC)
+		SET @FilterProductsByAffiliate = (SELECT TOP 1 CASE ConfigValue WHEN 'true' THEN 1 ELSE 0 END FROM dbo.AppConfig WITH (NOLOCK) WHERE Name = 'FilterProductsByAffiliate' AND (StoreID = @StoreID OR StoreID = 0) ORDER BY StoreID DESC)
+		SET @HideProductsWithLessThanThisInventoryLevel	= (SELECT TOP 1 CONVERT(INT, ConfigValue) FROM dbo.AppConfig WITH (NOLOCK) WHERE Name = 'HideProductsWithLessThanThisInventoryLevel' AND ISNUMERIC(ConfigValue) = 1 AND (StoreID = @StoreID OR StoreID = 0) ORDER BY StoreID DESC)
+		SELECT @CustomerLevelCount = COUNT(*), @MinProductCustomerLevel = MIN(CustomerLevelID), @CustLevelExists = SUM(CASE WHEN CustomerLevelID = @CustomerLevelID THEN 1 ELSE 0 END) FROM dbo.ProductCustomerLevel WITH (NOLOCK) WHERE ProductID = @ProductID
+		SELECT @AffiliateCount = COUNT(*), @AffiliateExists = SUM(CASE WHEN AffiliateID = @AffiliateID THEN 1 ELSE 0 END) FROM dbo.ProductAffiliate WITH (NOLOCK) WHERE ProductID = @ProductID
+
+		IF (@HideProductsWithLessThanThisInventoryLevel > @InvFilter or @HideProductsWithLessThanThisInventoryLevel = -1) and @InvFilter <> 0
+			SET @InvFilter = @HideProductsWithLessThanThisInventoryLevel
+
+		IF
+		(
+			(
+				(
+					@FilterProductsByCustomerLevel = 0
+					OR @CustomerLevelCount = 0
+					OR (
+						@CustomerLevelFilteringIsAscending = 1
+						AND @MinProductCustomerLevel <= @CustomerLevelID)
+					OR @CustLevelExists > 0
+				)
+				AND (
+					@FilterProductsByAffiliate = 0
+					OR @AffiliateCount = 0
+					OR @AffiliateExists > 0)
+			)
+			OR @IsAdmin = 1
+		)
+		SELECT
+			  p.*
+			, pv.VariantID
+			, pv.name VariantName
+			, pv.Price
+			, pv.Description VariantDescription
+			, ISNULL(pv.SalePrice, 0) SalePrice
+			, ISNULL(pv.SkuSuffix, '') AS SkuSuffix
+			, ISNULL(pv.ManufacturerPartNumber, '') AS VariantManufacturerPartNumber
+			, ISNULL(pv.Dimensions, '') AS Dimensions
+			, pv.Weight
+			, ISNULL(pv.GTIN, '') AS GTIN
+			, pv.Condition
+			, ISNULL(pv.Points, 0) Points
+			, pv.Inventory
+			, pv.ImageFilenameOverride VariantImageFilenameOverride
+			, pv.isdefault
+			, pv.CustomerEntersPrice
+			, ISNULL(pv.colors, '') Colors
+			, ISNULL(pv.sizes, '') Sizes
+			, sp.name SalesPromptName
+			, CASE WHEN pcl.productid is null THEN 0 ELSE ISNULL(e.Price, 0) END ExtendedPrice
+			, PRODUCTMANUFACTURER.ManufacturerID AS ProductManufacturerId
+			, MANUFACTURER.Name AS ProductManufacturerName
+			, MANUFACTURER.SEName AS ProductManufacturerSEName
+		 FROM dbo.Product p WITH (NOLOCK)
+		 JOIN dbo.productvariant pv WITH (NOLOCK) ON p.ProductID = pv.ProductID
+		 JOIN dbo.SalesPrompt sp WITH (NOLOCK) ON p.SalesPromptID = sp.SalesPromptID
+	LEFT JOIN dbo.ExtendedPrice e WITH (NOLOCK) ON pv.VariantID=e.VariantID and e.CustomerLevelID = @CustomerLevelID
+	LEFT JOIN dbo.ProductCustomerLevel pcl WITH (NOLOCK) ON p.ProductID = pcl.ProductID and pcl.CustomerLevelID = @CustomerLevelID
+	LEFT JOIN (SELECT variantid, SUM(quan) inventory
+				 FROM inventory
+			 GROUP BY variantid) i on pv.variantid = i.variantid
+	LEFT JOIN dbo.PRODUCTMANUFACTURER WITH (NOLOCK) ON p.ProductID = PRODUCTMANUFACTURER.ProductID
+	LEFT JOIN dbo.MANUFACTURER WITH (NOLOCK) ON PRODUCTMANUFACTURER.ManufacturerID = MANUFACTURER.ManufacturerID
+	    WHERE p.ProductID = @ProductID
+		  AND p.Deleted = 0
+		  AND pv.Deleted = 0
+		  AND p.Published >= @PublishedOnly
+		  AND pv.Published >= @PublishedOnly
+		  AND pv.IsDefault >= @DefaultVariantOnly
+		  AND (CASE p.TrackInventoryBySizeAndColor WHEN 1 THEN ISNULL(i.inventory, 0) ELSE pv.inventory END >= @InvFilter or @InvFilter = 0)
+     ORDER BY pv.DisplayOrder, pv.name
+END
+
+GO
+
+
